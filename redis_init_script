@@ -1,0 +1,230 @@
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          proxy
+# Required-Start:    $remote_fs
+# Required-Stop:     $remote_fs
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: Start or stop the HTTP Proxy.
+### END INIT INFO
+
+build_help() {
+echo "
+Usage: $0 [operate] [OPTIONS]
+  [operate]
+    help               commands manual.
+    connect            Connect to server.
+    start              Start reids server gracefully.
+    stop               Stop redis server gracefully.
+    restart            Restart redis server gracefully.
+
+  [options]
+    -h  --host <hostname>      Server hostname (default: 127.0.0.1).
+    -p  --port <port>          Server port (default: 6379).
+    -s  --socket <socket>      Server socket (overrides hostname and port).
+    -a  --auth <password>      Password to use when connecting to the server.
+    -r  --repeat <repeat>      Execute specified command N times.
+    -i  --interval <interval>  When -r is used, waits <interval> seconds per command.
+      It is possible to specify sub-second times like -i 0.1.
+    -d  --db <db>              Database number.
+
+    -f  --force                Do operation forcefully.
+
+    --help                     Show the manual.
+
+Examples:
+    $0 start
+    $0 stop
+    $0 restart
+    $0 restart --force
+    $0 restart -p 6380 -a password
+    $0 restart -p 6380 --force
+    $0 restart -p 6380 -f
+
+Note:
+    1. When using --force the reids will be killed var mode 9 and remove PID file.
+    2. OSX not support long options(e.g. --force), use single-character options instead it.
+    3. Please run it with root role.
+
+When no command is given, $0 starts in interactive mode."
+}
+
+HOST="127.0.0.1"
+PORT=6379
+AUTH=""
+REPEAT=1
+INTERVAL=0
+FORCE=false
+
+PLATFORM=`uname -a | awk '{print $1}'`
+OPERATION=$1
+if [ -n "$OPERATION" ] ; then shift 1; else build_help; exit 1; fi
+
+case "$PLATFORM" in
+    Linux)
+        TEMP=`getopt -o h:p:a:d:s:i:r:f --long host-long:,port-long:,auth-long:,db-long:,socket-long:,repeat-long:,interval-long:,force-long,help-long \
+            -n 'Interval Error!' -- "$@"`
+        ;;
+    Darwin)
+        TEMP=`getopt h:p:a:d:s:i:r:f $*` ;;
+    *)
+        TEMP=`getopt -o h:p:a:d:s:i:r:f --long host-long:,port-long:,auth-long:,db-long:,socket-long:,repeat-long:,interval-long:,force-long,help-long \
+            -n 'Interval Error!' -- "$@"`
+        ;;
+esac
+
+if [ $? != 0 ] ; then echo "Terminating..." >&2 ; exit 1 ; fi
+
+eval set -- "$TEMP"
+
+while true
+do
+  case "$1" in
+    -h|--host-long) HOST=$2 ; shift 2 ;;
+    -p|--port-long) PORT=$2 ; shift 2 ;;
+    -a|--auth-long) AUTH=$2 ; shift 2 ;;
+    -d|--db-long) DB=$2 ; shift 2 ;;
+    -s|--socket-long)
+        HOST=`echo $2 | awk -F ':' '{ print $1 }'`
+        PORT=`echo $2 | awk -F ':' '{ print $2 }'`
+        shift 2
+        ;;
+    -r|--repeat-long) REPEAT=$2 ; shift 2 ;;
+    -i|--interval-long) INTERVAL=$2 ; shift 2 ;;
+    -f|--force-long) FORCE=true ; shift 1 ;;
+    --help-long) build_help; exit 1 ;;
+    --) shift ; break ;;
+    *)
+      build_help ; exit 1 ;;
+  esac
+done
+
+SERVER=`which redis-server`
+CLI=`which redis-cli`
+
+case "$PLATFORM" in
+    Linux)
+        CONF="/etc/redis/${PORT}.conf"
+        PIDFILE="/var/run/redis_${PORT}.pid"
+        DBDIR="/var/redis/${PORT}"
+        ;;
+    Darwin)
+        CONF="/usr/local/etc/redis/${PORT}.conf"
+        PIDFILE="/usr/local/var/run/redis_${PORT}.pid"
+        DBDIR="/usr/local/var/redis/${PORT}"
+        ;;
+    *)
+        echo "Use default config"
+        PIDFILE="/var/run/redis_${PORT}.pid"
+        DBDIR="/var/redis/${PORT}"
+        ;;
+esac
+
+if [ ! -d $DBDIR ] ; then mkdir -p $DBDIR; fi
+
+echo "配置文件：${CONF}\n进程文件：${PIDFILE}\n存储目录：${DBDIR}"
+
+connect() {
+    if [ -n "$AUTH" ]
+    then
+        $CLI -h $HOST -p $PORT -a $AUTH
+    else
+        $CLI -h $HOST -p $PORT
+    fi
+}
+
+start() {
+    if [ -f $PIDFILE ]
+    then
+        echo "$PIDFILE exists, process is already running or crashed"
+    else
+        echo "Starting ..."
+        $SERVER $CONF
+        while [ ! -f $PIDFILE ]
+        do
+            echo "Waiting for Redis to start ..."
+            sleep 1
+        done
+        echo "Redis started at $PORT"
+    fi
+}
+
+stopGrace() {
+    if [ ! -f $PIDFILE ]
+    then
+        echo "$PIDFILE does not exist, process is not running"
+    else
+        PID=$(cat $PIDFILE)
+        echo "Stopping ..."
+
+        if [ -n "$AUTH" ]
+        then
+            $CLI -p $PORT -a $AUTH shutdown
+        else
+            $CLI -p $PORT shutdown
+        fi
+
+        while [ -x /proc/${PID} ]
+        do
+            echo "Waiting for Redis to shutdown ..."
+            sleep 1
+        done
+        echo "Redis stopped"
+    fi
+}
+
+stopForce() {
+    PID=$(cat $PIDFILE)
+    if [ -n "$PID" ]
+    then
+        kill -9 $PID
+        if [ $? -eq 0 ];then echo "Killed redis process at $PID forcefully ..."; fi
+    fi
+
+    if [ -f $PIDFILE ]
+    then
+        rm $PIDFILE
+        if [ $? -eq 0 ]
+        then
+            echo "Removed PID file $PIDFILE"
+        fi
+    fi
+}
+
+restartGrace() {
+    stopGrace
+    start
+}
+
+restartForce() {
+    stopForce
+    start
+}
+
+case "$OPERATION" in
+    connect)
+        connect
+        ;;
+    start)
+        start
+        ;;
+    stop)
+        if [ "$FORCE" = true ]
+        then
+            stopForce
+        else
+            stopGrace
+        fi
+        ;;
+    restart)
+        if [ "$FORCE" = true ]
+        then
+            restartForce
+        else
+            restartGrace
+        fi
+        ;;
+    *)
+        build_help
+        ;;
+esac
